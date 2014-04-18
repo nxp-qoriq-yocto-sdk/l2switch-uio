@@ -1,0 +1,5 @@
+README for T1040 L2 Switch UIO driver
+
+uio-driver folder contains the UIO driver for the L2 Switch 
+integrated in T1040 SoC.
+
