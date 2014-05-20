@@ -28,9 +28,7 @@
  */
 
 #include <linux/device.h>
-#include <linux/io.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/uio_driver.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
