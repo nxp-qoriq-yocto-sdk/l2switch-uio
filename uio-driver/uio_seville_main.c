@@ -267,8 +267,7 @@ static irqreturn_t seville_handler(int irq, struct uio_info *info)
         CLR_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
 
         if (likely(priv->npi_dev->read_thread))
-            if (unlikely(!wake_up_process(priv->npi_dev->read_thread)))
-                pr_warn(DEVICE_NAME" Sleeping thread is awake");
+            wake_up_interruptible(&priv->npi_dev->npi_read_q);
 
         handled = IRQ_HANDLED;
     }

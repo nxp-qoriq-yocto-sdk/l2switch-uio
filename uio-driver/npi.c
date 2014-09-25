@@ -496,14 +496,11 @@ static ssize_t dev_npi_read(struct file *file, char __user *buff, size_t len,
     if (size || (file->f_flags & O_NONBLOCK))
         return size;
 
-    /* prepare to sleep */
-    set_current_state(TASK_INTERRUPTIBLE);
-
     /* if we do not have a frame pending,
      * enable interrupt and wait for one */
     SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
-
-    schedule();
+    wait_event_interruptible(priv->npi_read_q,
+        ((ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1) != 0));
 
     return do_control_frame_extr_dev(priv, buff, len);
 }
@@ -562,6 +559,8 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
         goto __err_npi_cdev_add;
 
     npi_dev->read_thread = NULL;
+
+    init_waitqueue_head(&npi_dev->npi_read_q);
 
     return 0;
 

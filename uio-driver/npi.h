@@ -19,6 +19,7 @@
 #include <linux/io.h>
 #include <linux/sched.h>
 #include <linux/cdev.h>
+#include <linux/wait.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -49,9 +50,11 @@
  * @npi_nr:			assigned number for NPI char device;
  * @npi_class:			class created for NPI char device;
  * @read_thread:		the thread that opened the NPI char device
- * 				must be remembered to be able to wake it up from
- * 				the seville interrupt handler when control
- * 				frames are available;
+ * 				must be remembered to assure that there is
+ * 				only one process that injects/extracts control
+ * 				frames;
+ * @npi_read_q			work queue used to wake up a thread making a
+ * 				blocking NPI read;
  */
 struct npi_device {
     struct uio_info *info;
@@ -66,6 +69,8 @@ struct npi_device {
     struct class *npi_class;
 
     struct task_struct *read_thread;
+
+    wait_queue_head_t npi_read_q;
 };
 
 int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info);
