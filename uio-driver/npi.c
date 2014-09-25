@@ -13,6 +13,10 @@
 
 #include "npi.h"
 
+#include <linux/poll.h>
+
+#define FLUSH_TIMEOUT	100000
+
 /* Defines used for EOF special values */
 #define CONTROL_FRAME_EOF_MASK			0xFFFFFFF8
 #define CONTROL_FRAME_EOF			0x80000000
@@ -516,11 +520,53 @@ static ssize_t dev_npi_write(struct file *file, const char __user *buff,
     return do_control_frame_inj_dev(priv, buff, len);
 }
 
+static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
+{
+    struct npi_device *priv = (struct npi_device *)file->private_data;
+    struct uio_info *info;
+
+    if (unlikely(!priv))
+        return POLLERR;
+
+    info = priv->info;
+    if (unlikely(!info))
+        return POLLERR;
+
+    /* first skip words that are not data */
+    while (priv->leftover_start < priv->leftover_end &&
+                (priv->leftover_word[priv->leftover_start] &
+                        CONTROL_FRAME_EOF_MASK) == CONTROL_FRAME_EOF &&
+                        priv->leftover_word[priv->leftover_start] !=
+                                CONTROL_FRAME_EOF_ESCAPE)
+        priv->leftover_start++;
+
+     /* we might already read a frame from the previous read */
+    if (priv->leftover_start < priv->leftover_end)
+        return POLLIN | POLLRDNORM;
+
+    /* If we have data pending, return */
+    if (ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1)
+        return POLLIN | POLLRDNORM;
+
+    /* Enable interrupt to assure we have data ready */
+    if (!(ioread32(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE) & GR0))
+        SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
+
+    poll_wait(file, &priv->npi_read_q, wait);
+
+    /* if data is now available, then we are ready to read it */
+    if (ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1)
+        return POLLIN | POLLRDNORM;
+
+    return 0;
+}
+
 static struct file_operations npi_fops = {
 		.open = dev_npi_open,
 		.release = dev_npi_close,
 		.read = dev_npi_read,
 		.write = dev_npi_write,
+		.poll = dev_npi_poll,
 };
 
 int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
