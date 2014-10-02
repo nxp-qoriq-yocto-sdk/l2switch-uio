@@ -82,5 +82,6 @@
 
 #define VTSS_DEVCPU_QS_REMAP_INTR_RAW        VTSS_IOREG(VTSS_TO_DEVCPU_QS,0x402)
 
+#define FSL_EXTRACTION_GROUP(group_number)   (VTSS_TO_DEVCPU_QS + (group_number + 2) * 0x1000)
 
 #endif /* _VTSS_SEVILLE_REGS_DEVCPU_QS_H_ */

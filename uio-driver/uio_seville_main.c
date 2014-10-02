@@ -42,16 +42,14 @@
 #include <linux/of_net.h>
 #include <linux/of_address.h>
 
-#define VTSS_IOREG(t,o) (info->mem[0].internal_addr + VTSS_IOADDR(t,o))
-#include "vtss_seville_regs_devcpu_gcb.h"
-#include "vtss_seville_regs_devcpu_qs.h"
-
 /* Register used for remapper bypassing */
 #define T1040_SCFG_ESGMIISELCR		0xffe0fc020
 
 /* Bit masks used to for address remapper scfg_esgmiiselcr */
 #define T1040_SCFG_ESGMIISELCR_ENA		0x20
 #define T1040_SCFG_ESGMIISELCR_GMIISEL		0x80
+
+#include "npi.h"
 
 /* Vitesse VSC8514 PHY_ID */
 #define PHY_ID_VSC8514			0x00070670
@@ -80,12 +78,6 @@
 /* Timeout used to wait while MIIM controller becomes idle */
 #define MIIM_TIMEOUT		1000000
 
-/* Extraction group 1 mask */
-#define GR1 0x40
-
-#define SET_REG(reg, mask)	iowrite32(ioread32((reg)) | (mask), (reg))
-#define CLR_REG(reg, mask)	iowrite32(ioread32((reg)) & ~(mask), (reg))
-
 #define DEVICE_NAME "seville"
 
 /* Private structure for external ports located in a struct net_device */
@@ -111,6 +103,7 @@ struct uio_seville {
     const u8 *mac_addr;
     struct platform_device *pdev;
     struct seville_port_list port_list;
+    struct npi_device *npi_dev;
 };
 
 /* Prototypes for creating and destroying sysfs entries */
@@ -262,9 +255,22 @@ static irqreturn_t seville_handler(int irq, struct uio_info *info)
         handled = 0;
     } else {
         struct uio_seville *priv = info->priv;
-        if (!test_and_set_bit(0, &priv->flags))
-            disable_irq_nosync(irq);
-        handled = 1;
+
+        /* clear interrupt pending */
+        SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
+        if (unlikely(!(ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1))) {
+            /* no data is pending */
+            return IRQ_RETVAL(IRQ_HANDLED);
+        }
+
+        /* Disable interrupt */
+        CLR_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
+
+        if (likely(priv->npi_dev->read_thread))
+            if (unlikely(!wake_up_process(priv->npi_dev->read_thread)))
+                pr_warn(DEVICE_NAME" Sleeping thread is awake");
+
+        handled = IRQ_HANDLED;
     }
     return IRQ_RETVAL(handled);
 }
@@ -602,6 +608,7 @@ static int seville_probe(struct platform_device *pdev)
     info = &priv->uio;
     info->priv = priv;
     priv->mac_addr = NULL;
+    priv->npi_dev = NULL;
     if (seville_of_io_remap(pdev, info, 0) == NULL) {
         goto out_error;
     }
@@ -615,29 +622,42 @@ static int seville_probe(struct platform_device *pdev)
     info->irqcontrol = seville_irqcontrol;
 
     spin_lock_init(&priv->lock);
-    priv->flags = 0; /* interrupt is enabled to begin with */
+    priv->flags = 0; /* interrupt is enabled in MPICH to begin with */
     priv->pdev = pdev;
     platform_set_drvdata(pdev, priv);
+
+    /* enable cache line support */
+    remap_res = request_mem_region(T1040_SCFG_ESGMIISELCR, sizeof(u32),
+            info->name);
+    if (remap_res)
+        remap = ioremap(remap_res->start, resource_size(remap_res));
+    else
+        /* some other driver might hold the register */
+        remap = ioremap(T1040_SCFG_ESGMIISELCR, sizeof(u32));
+
+    if (remap) {
+        iowrite32(ioread32(remap) & ~T1040_SCFG_ESGMIISELCR_ENA, remap);
+        iowrite32(ioread32(remap) | T1040_SCFG_ESGMIISELCR_GMIISEL, remap);
+
+        /* we no longer need access to this register */
+        iounmap(remap);
+    }
+    if (remap_res)
+        release_mem_region(T1040_SCFG_ESGMIISELCR, sizeof(u32));
+
+    /* Disable interrupt */
+    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
 
     if (uio_register_device(&pdev->dev, info))
         goto out_error;
 
     dev_info(&pdev->dev, "Found %s, UIO device - IRQ %ld, id 0x%08x.\n", info->name, info->irq, ioread32(VTSS_DEVCPU_GCB_CHIP_REGS_CHIP_ID));
 
-    remap_res = request_mem_region(T1040_SCFG_ESGMIISELCR, 4, pdev->name);
-    if (remap_res) {
-        remap = ioremap(remap_res->start, resource_size(remap_res));
-        if (remap) {
-            iowrite32(ioread32(remap) & ~T1040_SCFG_ESGMIISELCR_ENA, remap);
-            iowrite32(ioread32(remap) | T1040_SCFG_ESGMIISELCR_GMIISEL, remap);
-
-            /* Enable interrupt (only for group 1) */
-            iowrite32(GR1, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
-
-            iounmap(remap);
-        }
-        release_mem_region(T1040_SCFG_ESGMIISELCR, 4);
-    }
+    if (!(priv->npi_dev = kzalloc(sizeof(*priv->npi_dev), GFP_KERNEL)))
+          return -ENOMEM;
+    /* Init char device for injection and extraction of control frames */
+    if (dev_npi_init(priv->npi_dev, info))
+        pr_warn(DEVICE_NAME" Failed to initialize npi char device\n");
 
     /* get L2switch MAC address from device tree */
     priv->mac_addr = of_get_mac_address(pdev->dev.of_node);
@@ -727,8 +747,11 @@ out_error:
     if (sysfs_phy_name) kfree(sysfs_phy_name);
     if (driver_register) phy_driver_unregister(&phy_driver_stub);
     device_remove_file(&pdev->dev, &dev_attr_mac_address);
+    dev_npi_cleanup(priv->npi_dev);
+    if (priv->npi_dev) kfree(priv->npi_dev);
     uio_unregister_device(info);
     if( info->mem[0].internal_addr) iounmap(info->mem[0].internal_addr);
+    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
     kfree(info);
     pr_err("%s: Driver probe error\n", DEVICE_NAME);
     return -ENODEV;
@@ -752,9 +775,6 @@ static int seville_remove(struct platform_device *pdev)
     if (!sysfs_phy_name)
         return 0;
 
-    /* Disable interrupt */
-    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
-
     /* free net-devices */
     list_for_each(pos, &priv->port_list.list) {
         tmp_port = list_entry(pos, struct seville_port_list, list);
@@ -773,7 +793,6 @@ static int seville_remove(struct platform_device *pdev)
         free_netdev(tmp_port->ndev);
         tmp_port->ndev = NULL;
     }
-
     kfree(sysfs_phy_name);
 
     /* Unregister PHY stub driver */
@@ -781,10 +800,17 @@ static int seville_remove(struct platform_device *pdev)
     platform_set_drvdata(pdev, NULL);
 
     device_remove_file(&pdev->dev, &dev_attr_mac_address);
+    dev_npi_cleanup(priv->npi_dev);
+    if (priv->npi_dev) kfree(priv->npi_dev);
+
+    /* Disable interrupt */
+    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
+
     uio_unregister_device(info);
-    iounmap(info->mem[0].internal_addr);
+
+    if (info->mem[0].internal_addr) iounmap(info->mem[0].internal_addr);
     kfree(info->priv);
-    
+
     return 0;
 }
 
