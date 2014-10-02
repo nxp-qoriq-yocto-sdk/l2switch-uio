@@ -601,7 +601,7 @@ static int seville_probe(struct platform_device *pdev)
         return -ENOMEM;
     info = &priv->uio;
     info->priv = priv;
-
+    priv->mac_addr = NULL;
     if (seville_of_io_remap(pdev, info, 0) == NULL) {
         goto out_error;
     }
@@ -708,7 +708,6 @@ static int seville_probe(struct platform_device *pdev)
     return 0;
 
 out_error:
-    device_remove_file(&pdev->dev, &dev_attr_mac_address);
     list_for_each(pos, &priv->port_list.list) {
         tmp_port = list_entry(pos, struct seville_port_list, list);
         if (!tmp_port->ndev)
@@ -727,6 +726,8 @@ out_error:
 
     if (sysfs_phy_name) kfree(sysfs_phy_name);
     if (driver_register) phy_driver_unregister(&phy_driver_stub);
+    device_remove_file(&pdev->dev, &dev_attr_mac_address);
+    uio_unregister_device(info);
     if( info->mem[0].internal_addr) iounmap(info->mem[0].internal_addr);
     kfree(info);
     pr_err("%s: Driver probe error\n", DEVICE_NAME);
@@ -746,8 +747,6 @@ static int seville_remove(struct platform_device *pdev)
     if (!info) {
         return 0;
     }
-
-    device_remove_file(&pdev->dev, &dev_attr_mac_address);
 
     sysfs_phy_name = kzalloc(sizeof("phy_") + 3, GFP_KERNEL);
     if (!sysfs_phy_name)
@@ -781,6 +780,7 @@ static int seville_remove(struct platform_device *pdev)
     phy_driver_unregister(&phy_driver_stub);
     platform_set_drvdata(pdev, NULL);
 
+    device_remove_file(&pdev->dev, &dev_attr_mac_address);
     uio_unregister_device(info);
     iounmap(info->mem[0].internal_addr);
     kfree(info->priv);
