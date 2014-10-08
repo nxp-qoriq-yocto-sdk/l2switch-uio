@@ -311,7 +311,7 @@ static void __iomem *seville_of_io_remap(struct platform_device *pdev,
         if ((addr = ioremap(info->mem[index].addr, info->mem[index].size))) {
             info->mem[index].internal_addr = addr;
             info->mem[index].memtype = UIO_MEM_PHYS;
-            pr_devel("%s: %d: Mapped %llx size %zu to %p\n", DEVICE_NAME,
+            pr_devel("%s: %d: Mapped %llx size %lu to %p\n", DEVICE_NAME,
                      index, info->mem[index].addr, info->mem[index].size, addr);
         }
     } else {
