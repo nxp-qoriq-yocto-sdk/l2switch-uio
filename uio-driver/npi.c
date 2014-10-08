@@ -21,10 +21,10 @@
 #define CONTROL_FRAME_EOF_MASK			0xFFFFFFF8
 #define CONTROL_FRAME_EOF			0x80000000
 #define CONTROL_FRAME_EOF_UNUSED_BYTES_MASK	0x00000003
-#define CONTROL_FRAME_EOF_TRUNCATE		0x80000004
-#define CONTROL_FRAME_EOF_INVALID		0x80000005
-#define CONTROL_FRAME_EOF_ESCAPE		0x80000006
-#define CONTROL_FRAME_EOF_DATA_NOT_READY	0x80000007
+#define CONTROL_FRAME_TRUNCATE		0x80000004
+#define CONTROL_FRAME_INVALID		0x80000005
+#define CONTROL_FRAME_ESCAPE		0x80000006
+#define CONTROL_FRAME_DATA_NOT_READY	0x80000007
 
 #define FIFO_REMAPPER_SIZE	4096
 
@@ -77,13 +77,13 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
                 (priv->leftover_word[priv->leftover_start] &
                         CONTROL_FRAME_EOF_MASK) == CONTROL_FRAME_EOF &&
                         priv->leftover_word[priv->leftover_start] !=
-                                CONTROL_FRAME_EOF_ESCAPE)
+                                CONTROL_FRAME_ESCAPE)
         priv->leftover_start++;
 
     /* if we found an escape EOF, remember that next word is data */
     if (unlikely(priv->leftover_start < priv->leftover_end &&
             priv->leftover_word[priv->leftover_start] ==
-            CONTROL_FRAME_EOF_ESCAPE)) {
+            CONTROL_FRAME_ESCAPE)) {
         data_next = 1;
         priv->leftover_start++;
     }
@@ -102,7 +102,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
         }
 
         switch(priv->leftover_word[i]) {
-        case CONTROL_FRAME_EOF_ESCAPE:
+        case CONTROL_FRAME_ESCAPE:
             /* send to userspace current packet words */
             unwritten_bytes = copy_to_user(&buff[frame_size],
                     &priv->leftover_word[priv->leftover_start],
@@ -119,8 +119,8 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
             data_next = 1;
 
             break;
-        case CONTROL_FRAME_EOF_TRUNCATE:
-        case CONTROL_FRAME_EOF_INVALID:
+        case CONTROL_FRAME_TRUNCATE:
+        case CONTROL_FRAME_INVALID:
             /* discard truncated or invalid frames */
             frame_size = 0;
             priv->leftover_start = i + 1;
@@ -138,7 +138,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
 
                 /* remove unused bytes from last word */
                 if (likely(priv->leftover_word[i] !=
-                        CONTROL_FRAME_EOF_DATA_NOT_READY)) {
+                        CONTROL_FRAME_DATA_NOT_READY)) {
                     unused_bytes = priv->leftover_word[i] &
                                     CONTROL_FRAME_EOF_UNUSED_BYTES_MASK;
                     if (likely(unused_bytes > (ssize_t)unwritten_bytes &&
@@ -230,7 +230,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
             }
 
             switch(extr_cache[chunk_size]) {
-            case CONTROL_FRAME_EOF_ESCAPE:
+            case CONTROL_FRAME_ESCAPE:
                 unwritten_bytes = copy_to_user(&buff[frame_size], extr_cache,
                         min(len, chunk_size * sizeof(u32)));
                 if (likely(unwritten_bytes >= 0)) {
@@ -246,8 +246,8 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
                 data_next = 1;
 
                 break;
-            case CONTROL_FRAME_EOF_TRUNCATE:
-            case CONTROL_FRAME_EOF_INVALID:
+            case CONTROL_FRAME_TRUNCATE:
+            case CONTROL_FRAME_INVALID:
                 extr_cache += chunk_size + 1;
                 chunk_size = frame_size = 0;
                 len = len_bk;
@@ -269,7 +269,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
 
                     /* remove unused bytes from last word */
                     if (likely(extr_cache[chunk_size] !=
-                            CONTROL_FRAME_EOF_DATA_NOT_READY)) {
+                            CONTROL_FRAME_DATA_NOT_READY)) {
                         unused_bytes = extr_cache[chunk_size] &
                                 CONTROL_FRAME_EOF_UNUSED_BYTES_MASK;
                         if (likely(unused_bytes > (ssize_t)unwritten_bytes &&
@@ -537,7 +537,7 @@ static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
                 (priv->leftover_word[priv->leftover_start] &
                         CONTROL_FRAME_EOF_MASK) == CONTROL_FRAME_EOF &&
                         priv->leftover_word[priv->leftover_start] !=
-                                CONTROL_FRAME_EOF_ESCAPE)
+                                CONTROL_FRAME_ESCAPE)
         priv->leftover_start++;
 
      /* we might already read a frame from the previous read */
