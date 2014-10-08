@@ -32,9 +32,6 @@
 
 static inline void cache_line_load_and_lock(void __iomem *addr)
 {
-    if (!addr)
-        return;
-
     asm volatile (
             "dcbz 0, %[addr]\n\t"
             "dcbtls 2, 0, %[addr]\n\t"
@@ -45,9 +42,6 @@ static inline void cache_line_load_and_lock(void __iomem *addr)
 
 static inline void cache_line_unlock(void __iomem *addr)
 {
-    if (!addr)
-        return;
-
     asm volatile (
             "dcblc 0, 0, %[addr]\n\t"
             "dcblc 2, 0, %[addr]\n\t"
