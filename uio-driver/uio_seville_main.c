@@ -598,7 +598,7 @@ static int seville_probe(struct platform_device *pdev)
     struct list_head *pos, *aux;
     int driver_register = 0;
     char *sysfs_phy_name = NULL;
-    int sz;
+    int sz, ret;
     const void *prop;
 
     priv = kzalloc(sizeof(struct uio_seville), GFP_KERNEL);
@@ -609,7 +609,9 @@ static int seville_probe(struct platform_device *pdev)
     priv->mac_addr = NULL;
     priv->npi_dev = NULL;
     if (seville_of_io_remap(pdev, info, 0) == NULL) {
-        goto out_error;
+        pr_err(DEVICE_NAME" failed to map seville registers\n");
+        ret = ENODEV;
+        goto __out_err_seville_remap;
     }
 
     info->name = "Seville Switch";
@@ -631,7 +633,9 @@ static int seville_probe(struct platform_device *pdev)
     if (remap_res)
         remap = ioremap(remap_res->start, resource_size(remap_res));
     else
-        /* some other driver might hold the register */
+        /* WARN: some other driver might hold the register.
+         * We should use an API to clear/set our bits
+         */
         remap = ioremap(T1040_SCFG_ESGMIISELCR, sizeof(u32));
 
     if (remap) {
@@ -647,13 +651,20 @@ static int seville_probe(struct platform_device *pdev)
     /* Disable interrupt */
     iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
 
-    if (uio_register_device(&pdev->dev, info))
-        goto out_error;
+    if (uio_register_device(&pdev->dev, info)) {
+        pr_err(DEVICE_NAME" failed to register the uio device\n");
+        ret = -ENODEV;
+        goto __out_err_seville_register;
+    }
 
     dev_info(&pdev->dev, "Found %s, UIO device - IRQ %ld, id 0x%08x.\n", info->name, info->irq, ioread32(VTSS_DEVCPU_GCB_CHIP_REGS_CHIP_ID));
 
-    if (!(priv->npi_dev = kzalloc(sizeof(*priv->npi_dev), GFP_KERNEL)))
-          return -ENOMEM;
+    if (!(priv->npi_dev = kzalloc(sizeof(*priv->npi_dev), GFP_KERNEL))) {
+        pr_err(DEVICE_NAME" out of memory\n");
+        ret = -ENOMEM;
+        goto __out_err_npi_alloc;
+    }
+
     /* Init char device for injection and extraction of control frames */
     if (dev_npi_init(priv->npi_dev, info))
         pr_warn(DEVICE_NAME" Failed to initialize npi char device\n");
@@ -671,14 +682,16 @@ static int seville_probe(struct platform_device *pdev)
     /* Register stub PHY driver */
     if ((driver_register = phy_driver_register(&phy_driver_stub))) {
         pr_err(DEVICE_NAME" Cannot register PHY driver\n");
-        goto out_error;
+        ret = -ENODEV;
+        goto __out_err_phy_stub_register;
     }
 
     INIT_LIST_HEAD(&priv->port_list.list);
     sysfs_phy_name = kzalloc(sizeof("phy_") + 3, GFP_KERNEL);
     if (!sysfs_phy_name) {
         pr_err(DEVICE_NAME" out of memory\n");
-        goto out_error;
+        ret = -ENOMEM;
+        goto __out_err_phy_name_alloc;
     }
 
     /* Parse port nodes */
@@ -693,13 +706,15 @@ static int seville_probe(struct platform_device *pdev)
             prop = of_get_property(child, "port-index", &sz);
             if (!prop || sz < sizeof(port_priv->port_idx)) {
                 pr_err(DEVICE_NAME" port-index not specified - required parameter\n");
-                goto out_error;
+                ret = -ENODEV;
+                goto __out_err_seville_port_node;
             }
             tmp_port = devm_kzalloc(&pdev->dev, sizeof(*tmp_port),
                             GFP_KERNEL);
             if (unlikely(tmp_port == NULL)) {
                 pr_err(DEVICE_NAME" out of memory\n");
-                goto out_error;
+                ret = -ENOMEM;
+                goto __out_err_seville_port_node;
             }
 
             tmp_port->ndev = NULL;
@@ -724,15 +739,18 @@ static int seville_probe(struct platform_device *pdev)
                 vsc9953_lynx_init(child, info);
 
     kfree(sysfs_phy_name);
+
     return 0;
 
-out_error:
+__out_err_seville_port_node:
     list_for_each_safe(pos, aux, &priv->port_list.list) {
         tmp_port = list_entry(pos, struct seville_port_list, list);
         if (!tmp_port->ndev)
             continue;
 
         port_priv = netdev_priv(tmp_port->ndev);
+        if (!port_priv)
+            continue;
 
         sprintf(sysfs_phy_name, "phy_%u", port_priv->port_idx);
         sysfs_remove_link(&pdev->dev.kobj, sysfs_phy_name);
@@ -745,32 +763,43 @@ out_error:
         devm_kfree(&pdev->dev, tmp_port);
     }
 
-    if (sysfs_phy_name) kfree(sysfs_phy_name);
-    if (driver_register) phy_driver_unregister(&phy_driver_stub);
+    kfree(sysfs_phy_name);
+__out_err_phy_name_alloc:
+    phy_driver_unregister(&phy_driver_stub);
+__out_err_phy_stub_register:
     device_remove_file(&pdev->dev, &dev_attr_mac_address);
-    dev_npi_cleanup(priv->npi_dev);
-    if (priv->npi_dev) kfree(priv->npi_dev);
+    if (priv->npi_dev) {
+        dev_npi_cleanup(priv->npi_dev);
+        kfree(priv->npi_dev);
+    }
+__out_err_npi_alloc:
     uio_unregister_device(info);
-    if( info->mem[0].internal_addr) iounmap(info->mem[0].internal_addr);
+__out_err_seville_register:
+    iounmap(info->mem[0].internal_addr);
     iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
-    kfree(info);
-    pr_err("%s: Driver probe error\n", DEVICE_NAME);
-    return -ENODEV;
+__out_err_seville_remap:
+    kfree(priv);
+    pr_err(DEVICE_NAME": Driver probe error\n");
+    return ret;
 }
-
 
 static int seville_remove(struct platform_device *pdev)
 {
-    struct uio_info *info = platform_get_drvdata(pdev);
-    struct uio_seville *priv = info->priv;
+    struct uio_info *info;
+    struct uio_seville *priv;
     struct list_head *pos, *aux;
     struct seville_port_list *tmp_port;
     struct seville_port_private *port_priv;
     char *sysfs_phy_name;
 
-    if (!info) {
-        return 0;
-    }
+    info = platform_get_drvdata(pdev);
+
+    if (!info)
+        return -EINVAL;
+
+    priv = info->priv;
+    if (!priv)
+        return -EINVAL;
 
     sysfs_phy_name = kzalloc(sizeof("phy_") + 3, GFP_KERNEL);
     if (!sysfs_phy_name)
@@ -782,6 +811,8 @@ static int seville_remove(struct platform_device *pdev)
         if (!tmp_port->ndev)
             continue;
         port_priv = netdev_priv(tmp_port->ndev);
+        if (!port_priv)
+            continue;
 
         /* Remove PHY sysfs entries */
         phy_remove(&port_priv->phy_dev->dev);
@@ -803,16 +834,18 @@ static int seville_remove(struct platform_device *pdev)
     platform_set_drvdata(pdev, NULL);
 
     device_remove_file(&pdev->dev, &dev_attr_mac_address);
-    dev_npi_cleanup(priv->npi_dev);
-    if (priv->npi_dev) kfree(priv->npi_dev);
+
+    if (priv->npi_dev) {
+        dev_npi_cleanup(priv->npi_dev);
+        kfree(priv->npi_dev);
+    }
 
     /* Disable interrupt */
     iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
-
     uio_unregister_device(info);
-
-    if (info->mem[0].internal_addr) iounmap(info->mem[0].internal_addr);
-    kfree(info->priv);
+    if (info->mem[0].internal_addr)
+        iounmap(info->mem[0].internal_addr);
+    kfree(priv);
 
     return 0;
 }
