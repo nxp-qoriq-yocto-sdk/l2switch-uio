@@ -595,7 +595,7 @@ static int seville_probe(struct platform_device *pdev)
     const char *port_status;
     struct seville_port_list *tmp_port;
     struct seville_port_private *port_priv;
-    struct list_head *pos;
+    struct list_head *pos, *aux;
     int driver_register = 0;
     char *sysfs_phy_name = NULL;
     int sz;
@@ -727,7 +727,7 @@ static int seville_probe(struct platform_device *pdev)
     return 0;
 
 out_error:
-    list_for_each(pos, &priv->port_list.list) {
+    list_for_each_safe(pos, aux, &priv->port_list.list) {
         tmp_port = list_entry(pos, struct seville_port_list, list);
         if (!tmp_port->ndev)
             continue;
@@ -741,6 +741,8 @@ out_error:
         port_priv->phy_dev->attached_dev = NULL;
         free_netdev(tmp_port->ndev);
         tmp_port->ndev = NULL;
+        list_del(pos);
+        devm_kfree(&pdev->dev, tmp_port);
     }
 
     if (sysfs_phy_name) kfree(sysfs_phy_name);
@@ -761,7 +763,7 @@ static int seville_remove(struct platform_device *pdev)
 {
     struct uio_info *info = platform_get_drvdata(pdev);
     struct uio_seville *priv = info->priv;
-    struct list_head *pos;
+    struct list_head *pos, *aux;
     struct seville_port_list *tmp_port;
     struct seville_port_private *port_priv;
     char *sysfs_phy_name;
@@ -775,7 +777,7 @@ static int seville_remove(struct platform_device *pdev)
         return 0;
 
     /* free net-devices */
-    list_for_each(pos, &priv->port_list.list) {
+    list_for_each_safe(pos, aux, &priv->port_list.list) {
         tmp_port = list_entry(pos, struct seville_port_list, list);
         if (!tmp_port->ndev)
             continue;
@@ -791,6 +793,8 @@ static int seville_remove(struct platform_device *pdev)
         port_priv->phy_dev->attached_dev = NULL;
         free_netdev(tmp_port->ndev);
         tmp_port->ndev = NULL;
+        list_del(pos);
+        devm_kfree(&pdev->dev, tmp_port);
     }
     kfree(sysfs_phy_name);
 
