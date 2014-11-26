@@ -14,6 +14,7 @@
 #include "npi.h"
 
 #include <linux/poll.h>
+#include <linux/slab.h>
 
 #define FLUSH_TIMEOUT	100000
 
@@ -338,11 +339,14 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
 }
 
 static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
-		const char __user *buff, const size_t len)
+		const char __user *buff_usr, const size_t len)
 {
     struct uio_info *info;
     u32 val;
     size_t i;
+    ssize_t rc;
+    unsigned long not_copied;
+    char *buff;
 
     info = priv->info;
 
@@ -356,6 +360,17 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
     while(ioread32(VTSS_DEVCPU_QS_INJ_INJ_STATUS) &
             VTSS_M_DEVCPU_QS_INJ_INJ_STATUS_WMARK_REACHED)
         ;
+
+    /* get frame from userspace */
+    buff = kmalloc(len, GFP_KERNEL);
+    if (unlikely(!buff))
+        return -ENOMEM;
+
+    not_copied = copy_from_user(buff, buff_usr, len);
+    if (unlikely(not_copied)) {
+        rc = -EFAULT;
+        goto __out_return;
+    }
 
     /* next 32b are start-of-frame */
     SET_REG(VTSS_DEVCPU_QS_INJ_INJ_CTRL(0), VTSS_F_DEVCPU_QS_INJ_INJ_CTRL_SOF);
@@ -405,7 +420,11 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
     /* write dummy FCS */
     iowrite32be(0, VTSS_DEVCPU_QS_INJ_INJ_WR(0));
 
-    return len;
+    rc = len;
+
+__out_return:
+    kfree(buff);
+    return rc;
 }
 
 static int dev_npi_open(struct inode *inode, struct file *file)
