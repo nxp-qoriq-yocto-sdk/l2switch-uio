@@ -29,7 +29,6 @@
 
 #define FIFO_REMAPPER_SIZE	4096
 
-#define MAX_FRAME_SIZE		16384
 
 static inline void cache_line_load_and_lock(void __iomem *addr)
 {
