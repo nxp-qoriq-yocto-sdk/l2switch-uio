@@ -42,7 +42,7 @@
  * @leftover_word:		array used to hold the extra words that might be
  * 				present after we reach the end of a
  * 				control frame;
- * @leftover_start:		start of useful data contained
+ * @leftover_begin:		start of useful data contained
  * 				within the leftover;
  * @leftover_end:		end of useful data contained
  * 				within the leftover;
@@ -60,7 +60,7 @@ struct npi_device {
     struct uio_info *info;
     void __iomem *extraction_queue_fifo;
     u32 leftover_word[(2 * SMP_CACHE_BYTES)/sizeof(u32)];
-    size_t leftover_start;
+    size_t leftover_begin;
     size_t leftover_end;
 
     /* char device attributes */
