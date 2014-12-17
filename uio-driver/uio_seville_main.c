@@ -250,7 +250,7 @@ static DEVICE_ATTR(mac_address, S_IRUGO, &show_mac_addr, NULL);
 static irqreturn_t seville_handler(int irq, struct uio_info *info)
 {
     int handled;
-    if (!ioread32(VTSS_DEVCPU_QS_REMAP_INTR_IDENT)) {
+    if (unlikely(!(ioread32(VTSS_DEVCPU_QS_REMAP_INTR_IDENT) & GR0))) {
         /* not our interrupt */
         handled = 0;
     } else {
