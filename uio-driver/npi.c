@@ -486,8 +486,16 @@ static int dev_npi_open(struct inode *inode, struct file *file)
         return -EINVAL;
 
     /* Only one application may open this device */
-    if (priv->read_thread)
+    spin_lock(&priv->read_thread_lock);
+    if (priv->read_thread) {
+        spin_unlock(&priv->read_thread_lock);
         return -EBUSY;
+    }
+
+    /* get task_struct of the current thread */
+    priv->read_thread = current;
+
+    spin_unlock(&priv->read_thread_lock);
 
     info = priv->info;
 
@@ -511,9 +519,6 @@ static int dev_npi_open(struct inode *inode, struct file *file)
         /* interrupt might still be pending; keep reading frames */
     }while (GR0 & ioread32(VTSS_DEVCPU_QS_REMAP_INTR_IDENT));
 
-    /* get task_struct of the current thread */
-    priv->read_thread = current;
-
     file->private_data = priv;
 
     return 0;
@@ -531,7 +536,9 @@ static int dev_npi_close(struct inode *inode, struct file *file)
     /* clear leftovers */
     priv->leftover_begin = priv->leftover_end = 0;
 
+    spin_lock(&priv->read_thread_lock);
     priv->read_thread = NULL;
+    spin_unlock(&priv->read_thread_lock);
 
     info = priv->info;
 
@@ -648,6 +655,7 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
     npi_dev->read_thread = NULL;
 
     init_waitqueue_head(&npi_dev->npi_read_q);
+    spin_lock_init(&npi_dev->read_thread_lock);
     npi_dev->info = info;
 
     /* create NPI char device */

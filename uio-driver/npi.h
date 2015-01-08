@@ -20,6 +20,7 @@
 #include <linux/sched.h>
 #include <linux/cdev.h>
 #include <linux/wait.h>
+#include <linux/spinlock.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -49,6 +50,8 @@
  * @npi_cdev:			char device for NPI interface;
  * @npi_nr:			assigned number for NPI char device;
  * @npi_class:			class created for NPI char device;
+ * @read_thread_lock:		spinlock used to assure exclusive access to
+ * 				the read_thread variable;
  * @read_thread:		the thread that opened the NPI char device
  * 				must be remembered to assure that there is
  * 				only one process that injects/extracts control
@@ -68,6 +71,7 @@ struct npi_device {
     dev_t npi_nr;
     struct class *npi_class;
 
+    spinlock_t read_thread_lock;
     struct task_struct *read_thread;
 
     wait_queue_head_t npi_read_q;

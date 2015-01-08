@@ -266,6 +266,11 @@ static irqreturn_t seville_handler(int irq, struct uio_info *info)
         /* Disable interrupt */
         CLR_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
 
+        /* no need to hold the lock for read_thread here since we don't
+         * modify its value. there is no problem if
+         * read_thread becomes NULL after we check
+         * it and before we wake up the sleeping thread
+         */
         if (likely(priv->npi_dev->read_thread))
             wake_up_interruptible(&priv->npi_dev->npi_read_q);
 
