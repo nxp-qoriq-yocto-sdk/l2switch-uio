@@ -569,9 +569,21 @@ static ssize_t dev_npi_read(struct file *file, char __user *buff, size_t len,
     if (size || (file->f_flags & O_NONBLOCK))
         return size;
 
+    /* interrupt might still be pending, so we should try to clear it;
+     * if control frames arrived in the meantime, the interrupt
+     * will not be cleared
+     */
+    SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
+
+    /* if there are fames pending, read them */
+    if (unlikely(ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1))
+        return do_control_frame_extr_dev(priv, buff, len);
+
     /* if we do not have a frame pending,
      * enable interrupt and wait for one */
-    SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
+    if (!(ioread32(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE) & GR0))
+        SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
+
     wait_event_interruptible(priv->npi_read_q,
         ((ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1) != 0));
 
@@ -612,6 +624,9 @@ static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
      /* we might already read a frame from the previous read */
     if (priv->leftover_begin < priv->leftover_end)
         return POLLIN | POLLRDNORM;
+
+    /* interrupt might be pending, so we should try to clear it */
+    SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
 
     /* If we have data pending, return */
     if (ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1)

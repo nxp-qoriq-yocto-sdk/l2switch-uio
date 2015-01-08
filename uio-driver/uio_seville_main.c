@@ -250,19 +250,15 @@ static DEVICE_ATTR(mac_address, S_IRUGO, &show_mac_addr, NULL);
 static irqreturn_t seville_handler(int irq, struct uio_info *info)
 {
     int handled;
+    struct uio_seville *priv = info->priv;
+
     if (unlikely(!(ioread32(VTSS_DEVCPU_QS_REMAP_INTR_IDENT) & GR0))) {
-        /* not our interrupt */
-        handled = 0;
-    } else {
-        struct uio_seville *priv = info->priv;
+         /* not our interrupt */
+         handled = IRQ_NONE;
+         goto __return;
+    }
 
-        /* clear interrupt pending */
-        SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
-        if (unlikely(!(ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1))) {
-            /* no data is pending */
-            return IRQ_RETVAL(IRQ_HANDLED);
-        }
-
+    if (likely(ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1)) {
         /* Disable interrupt */
         CLR_REG(VTSS_DEVCPU_QS_REMAP_INTR_ENABLE, GR0);
 
@@ -275,7 +271,18 @@ static irqreturn_t seville_handler(int irq, struct uio_info *info)
             wake_up_interruptible(&priv->npi_dev->npi_read_q);
 
         handled = IRQ_HANDLED;
+        goto __return;
     }
+
+    /* if we reached here, it means that interrupt was raised,
+     * although there is no data pending; we should never reach here
+     * However, since we are here we should clear the pending interrupt
+     */
+    SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
+
+    handled = IRQ_HANDLED;
+
+__return:
     return IRQ_RETVAL(handled);
 }
 
