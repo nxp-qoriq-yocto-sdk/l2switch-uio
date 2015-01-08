@@ -645,6 +645,9 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
         return -EINVAL;
     }
 
+    npi_dev->read_thread = NULL;
+
+    init_waitqueue_head(&npi_dev->npi_read_q);
     npi_dev->info = info;
 
     /* create NPI char device */
@@ -665,10 +668,6 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
     cdev_init(&npi_dev->npi_cdev, &npi_fops);
     if ((ret = cdev_add(&npi_dev->npi_cdev, npi_dev->npi_nr, 1)))
         goto __err_npi_cdev_add;
-
-    npi_dev->read_thread = NULL;
-
-    init_waitqueue_head(&npi_dev->npi_read_q);
 
     return 0;
 
