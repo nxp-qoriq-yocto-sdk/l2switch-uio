@@ -53,7 +53,7 @@
  * 				must be remembered to assure that there is
  * 				only one process that injects/extracts control
  * 				frames;
- * @npi_read_q			work queue used to wake up a thread making a
+ * @npi_read_q:			work queue used to wake up a thread making a
  * 				blocking NPI read;
  */
 struct npi_device {
