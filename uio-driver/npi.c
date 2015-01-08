@@ -638,10 +638,6 @@ static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
 
     poll_wait(file, &priv->npi_read_q, wait);
 
-    /* if data is now available, then we are ready to read it */
-    if (ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1)
-        return POLLIN | POLLRDNORM;
-
     return 0;
 }
 
