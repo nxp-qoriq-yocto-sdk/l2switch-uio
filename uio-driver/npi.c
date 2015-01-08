@@ -544,19 +544,19 @@ static int dev_npi_close(struct inode *inode, struct file *file)
     if (!priv)
         return -EINVAL;
 
-    /* clear leftovers */
-    spin_lock(&priv->rx_lock);
-    priv->leftover_begin = priv->leftover_end = 0;
-    spin_unlock(&priv->rx_lock);
+    info = priv->info;
+
+    /* Disable interrupt */
+    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
 
     spin_lock(&priv->read_thread_lock);
     priv->read_thread = NULL;
     spin_unlock(&priv->read_thread_lock);
 
-    info = priv->info;
-
-    /* Disable interrupt */
-    iowrite32(0, VTSS_DEVCPU_QS_REMAP_INTR_ENABLE);
+    /* clear leftovers */
+    spin_lock(&priv->rx_lock);
+    priv->leftover_begin = priv->leftover_end = 0;
+    spin_unlock(&priv->rx_lock);
 
     return 0;
 }
