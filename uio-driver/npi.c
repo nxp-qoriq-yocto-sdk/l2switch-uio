@@ -118,6 +118,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
     cache_line_number = -1;
     copy_bytes_nr = 0;
 
+    spin_lock(&priv->rx_lock);
     frame = &priv->leftover_word[priv->leftover_begin];
     begin = 0;
     end = priv->leftover_end - priv->leftover_begin;
@@ -171,6 +172,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
             if (cache_line_number == -1) {
                 /* The whole frame was found in leftovers */
                 priv->leftover_begin += chunk_size + 1;
+                spin_unlock(&priv->rx_lock);
                 return rc;
             }
             priv->leftover_begin = 0;
@@ -383,7 +385,7 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
          */
         preempt_enable();
     }
-
+    spin_unlock(&priv->rx_lock);
     return frame_size;
 }
 
@@ -499,8 +501,10 @@ static int dev_npi_open(struct inode *inode, struct file *file)
 
     info = priv->info;
 
+    spin_lock(&priv->rx_lock);
     priv->leftover_end = priv->leftover_begin = 0;
     memset(priv->leftover_word, 0, sizeof(priv->leftover_word));
+    spin_unlock(&priv->rx_lock);
 
     /* Flush control port before registering the NPI char device */
     do {
@@ -534,7 +538,9 @@ static int dev_npi_close(struct inode *inode, struct file *file)
         return -EINVAL;
 
     /* clear leftovers */
+    spin_lock(&priv->rx_lock);
     priv->leftover_begin = priv->leftover_end = 0;
+    spin_unlock(&priv->rx_lock);
 
     spin_lock(&priv->read_thread_lock);
     priv->read_thread = NULL;
@@ -613,6 +619,8 @@ static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
     if (unlikely(!info))
         return POLLERR;
 
+    spin_lock(&priv->rx_lock);
+
     /* first skip words that are not data */
     while (priv->leftover_begin < priv->leftover_end &&
                 (priv->leftover_word[priv->leftover_begin] &
@@ -620,10 +628,12 @@ static unsigned int dev_npi_poll(struct file *file, poll_table *wait)
                         priv->leftover_word[priv->leftover_begin] !=
                                 CONTROL_FRAME_ESCAPE)
         priv->leftover_begin++;
-
-     /* we might already read a frame from the previous read */
-    if (priv->leftover_begin < priv->leftover_end)
+    /* we might already read a frame from the previous read */
+    if (priv->leftover_begin < priv->leftover_end) {
+        spin_unlock(&priv->rx_lock);
         return POLLIN | POLLRDNORM;
+    }
+    spin_unlock(&priv->rx_lock);
 
     /* interrupt might be pending, so we should try to clear it */
     SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
@@ -667,6 +677,7 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
 
     init_waitqueue_head(&npi_dev->npi_read_q);
     spin_lock_init(&npi_dev->read_thread_lock);
+    spin_lock_init(&npi_dev->rx_lock);
     npi_dev->info = info;
 
     /* create NPI char device */

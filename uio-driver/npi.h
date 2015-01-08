@@ -58,6 +58,8 @@
  * 				frames;
  * @npi_read_q:			work queue used to wake up a thread making a
  * 				blocking NPI read;
+ * @rx_lock:			spinlock used to assure that only one thread
+ * 				may extract a CPU frame at a time;
  */
 struct npi_device {
     struct uio_info *info;
@@ -75,6 +77,7 @@ struct npi_device {
     struct task_struct *read_thread;
 
     wait_queue_head_t npi_read_q;
+    spinlock_t rx_lock;
 };
 
 int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info);
