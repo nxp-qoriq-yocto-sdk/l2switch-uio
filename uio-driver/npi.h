@@ -60,6 +60,8 @@
  * 				blocking NPI read;
  * @rx_lock:			spinlock used to assure that only one thread
  * 				may extract a CPU frame at a time;
+ * @tx_lock:			spinlock used to assure that only one thread
+ * 				may inject a CPU frame at a time;
  */
 struct npi_device {
     struct uio_info *info;
@@ -78,6 +80,7 @@ struct npi_device {
 
     wait_queue_head_t npi_read_q;
     spinlock_t rx_lock;
+    spinlock_t tx_lock;
 };
 
 int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info);

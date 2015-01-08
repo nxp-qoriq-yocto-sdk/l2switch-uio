@@ -401,10 +401,13 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
 
     info = priv->info;
 
+    spin_lock(&priv->tx_lock);
+
     if (unlikely(ioread32(VTSS_DEVCPU_QS_INJ_INJ_STATUS) &
             VTSS_M_DEVCPU_QS_INJ_INJ_STATUS_INJ_IN_PROGRESS)) {
         pr_err("FIFO is busy reciving another frame\n");
-        return -EBUSY;
+        rc = -EBUSY;
+        goto __out_release_lock;
     }
 
     /* wait for available memory in CPU queues */
@@ -414,13 +417,15 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
 
     /* get frame from userspace */
     buff = kmalloc(len, GFP_KERNEL);
-    if (unlikely(!buff))
-        return -ENOMEM;
+    if (unlikely(!buff)) {
+        rc = -ENOMEM;
+        goto __out_release_lock;
+    }
 
     not_copied = copy_from_user(buff, buff_usr, len);
     if (unlikely(not_copied)) {
         rc = -EFAULT;
-        goto __out_return;
+        goto __out_free;
     }
 
     /* next 32b are start-of-frame */
@@ -473,8 +478,10 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
 
     rc = len;
 
-__out_return:
+__out_free:
     kfree(buff);
+__out_release_lock:
+    spin_unlock(&priv->tx_lock);
     return rc;
 }
 
@@ -678,6 +685,8 @@ int dev_npi_init(struct npi_device *npi_dev, struct uio_info *info)
     init_waitqueue_head(&npi_dev->npi_read_q);
     spin_lock_init(&npi_dev->read_thread_lock);
     spin_lock_init(&npi_dev->rx_lock);
+    spin_lock_init(&npi_dev->tx_lock);
+
     npi_dev->info = info;
 
     /* create NPI char device */
