@@ -29,6 +29,18 @@
 
 #define FIFO_REMAPPER_SIZE	4096
 
+enum status_word {
+	RX_STATUS_WORD_DATA,
+	RX_STATUS_WORD_EOF_0,
+	RX_STATUS_WORD_EOF_1,
+	RX_STATUS_WORD_EOF_2,
+	RX_STATUS_WORD_EOF_3,
+	RX_STATUS_WORD_TRUNCATE,
+	RX_STATUS_WORD_INVALID,
+	RX_STATUS_WORD_ESCAPE,
+	RX_STATUS_WORD_DATA_NOT_READY,
+	RX_STATUS_WORD_NONE
+};
 
 static inline void cache_line_load_and_lock(void __iomem *addr)
 {
@@ -48,291 +60,329 @@ static inline void cache_line_unlock(void __iomem *addr)
             : /* no output */ : [addr]"r"(addr));
 }
 
-static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
-		char __user *buff, size_t len)
+/* used to return the size of an entire chunk of data
+ * and the reason why the chunk is terminated
+ */
+static enum status_word rx_frame_get_next_chunk_sz(u32 *data, size_t max_len,
+        size_t *chunk_len)
 {
-    struct uio_info *info = priv->info;
-    size_t i;
-    int unwritten_bytes;
-    int eof;
-    u32 *extr_cache;
-    int cache_line_number;
-    ssize_t frame_size;
-    ssize_t chunk_size;
-    size_t len_bk = len;
-    ssize_t copied_bytes;
-    ssize_t unused_bytes;
-    int data_next;
+    *chunk_len = 0;
 
-    eof = frame_size = data_next = 0;
+    /* increase chunk size while we have data */
+    while (likely((*chunk_len < max_len && (data[*chunk_len] &
+            CONTROL_FRAME_EOF_MASK) != CONTROL_FRAME_EOF)))
+        (*chunk_len)++;
 
-    /* skip EOFs from beginning of leftover words */
-    while (priv->leftover_begin < priv->leftover_end &&
-                (priv->leftover_word[priv->leftover_begin] &
-                        CONTROL_FRAME_EOF_MASK) == CONTROL_FRAME_EOF &&
-                        priv->leftover_word[priv->leftover_begin] !=
-                                CONTROL_FRAME_ESCAPE)
-        priv->leftover_begin++;
+    /* if we reached the maximum allowed size for our chunk,
+     * return by notifying that we are in the middle of a frame
+     */
+    if (*chunk_len == max_len)
+        return RX_STATUS_WORD_DATA;
 
-    /* if we found an escape EOF, remember that next word is data */
-    if (unlikely(priv->leftover_begin < priv->leftover_end &&
-            priv->leftover_word[priv->leftover_begin] ==
-            CONTROL_FRAME_ESCAPE)) {
-        data_next = 1;
-        priv->leftover_begin++;
+    switch (data[*chunk_len]) {
+    case CONTROL_FRAME_DATA_NOT_READY:
+        return RX_STATUS_WORD_DATA_NOT_READY;
+    case CONTROL_FRAME_TRUNCATE:
+        return RX_STATUS_WORD_TRUNCATE;
+    case CONTROL_FRAME_ESCAPE:
+        return RX_STATUS_WORD_ESCAPE;
+    case CONTROL_FRAME_INVALID:
+        return RX_STATUS_WORD_INVALID;
+    default:
+        /* we reached the end of a frame */
+        return RX_STATUS_WORD_EOF_0 + (data[*chunk_len] - CONTROL_FRAME_EOF);
     }
+}
 
-    for (i = priv->leftover_begin; i < priv->leftover_end; i++) {
-        /* If we have a word with data, just keep on going */
-        if (likely((priv->leftover_word[i] & CONTROL_FRAME_EOF_MASK) !=
-                CONTROL_FRAME_EOF))
-            continue;
+static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
+        char __user *buff, size_t len)
+{
+    struct uio_info *info;
+    enum status_word word_rc;
+    u32 *frame;
+    size_t chunk_size, total_chunk_size, begin, end, copy_bytes_nr,
+        bytes_nr;
+    ssize_t frame_size, rc;
+    int cache_line_number, i;
 
-        /* a previous escape EOF assures us
-         * that this word contains packet data */
-        if (unlikely(data_next)) {
-            data_next = 0;
-            continue;
+    if (!priv)
+        return -EINVAL;
+
+    info = priv->info;
+    if (!info)
+        return -EINVAL;
+
+    chunk_size = 0;
+    frame_size = 0;
+    total_chunk_size = 0;
+    cache_line_number = -1;
+    copy_bytes_nr = 0;
+
+    frame = &priv->leftover_word[priv->leftover_begin];
+    begin = 0;
+    end = priv->leftover_end - priv->leftover_begin;
+
+    rc = 0;
+    do {
+        if (likely(end > begin)) {
+            word_rc = rx_frame_get_next_chunk_sz(&frame[begin], end - begin,
+                    &chunk_size);
+
+            /* Calculate the total number of valid bytes */
+            total_chunk_size = begin + chunk_size;
+        } else {
+            word_rc = RX_STATUS_WORD_DATA;
+            chunk_size = 0;
+            total_chunk_size = end;
         }
 
-        switch(priv->leftover_word[i]) {
-        case CONTROL_FRAME_ESCAPE:
-            /* send to userspace current packet words */
-            unwritten_bytes = copy_to_user(&buff[frame_size],
-                    &priv->leftover_word[priv->leftover_begin],
-                    min(len, (i - priv->leftover_begin) * sizeof(u32)));
-            if (likely(unwritten_bytes >= 0)) {
-                copied_bytes = min(len, (i - priv->leftover_begin) *
-                        sizeof(u32)) - (ssize_t)unwritten_bytes;
-                frame_size += copied_bytes;
-                len -= copied_bytes;
-            }
-            priv->leftover_begin = i + 1;
+        /* Reached the end of a frame chunk */
 
-            /* next word is data */
-            data_next = 1;
+        bytes_nr = total_chunk_size * sizeof(u32);
+        if (word_rc >= RX_STATUS_WORD_EOF_0 &&
+                word_rc <= RX_STATUS_WORD_EOF_3) {
+            if (unlikely(bytes_nr))
+                bytes_nr -= word_rc - RX_STATUS_WORD_EOF_0;
+            else
+                frame_size -= word_rc - RX_STATUS_WORD_EOF_0;
+        }
+
+        /* if the user's buffer is smaller, truncate the frame */
+        copy_bytes_nr = (len - (size_t)frame_size < bytes_nr ?
+                len - (size_t)frame_size : bytes_nr);
+
+        switch (word_rc) {
+        case RX_STATUS_WORD_TRUNCATE:
+        case RX_STATUS_WORD_INVALID:
+        case RX_STATUS_WORD_EOF_0:
+        case RX_STATUS_WORD_EOF_1:
+        case RX_STATUS_WORD_EOF_2:
+        case RX_STATUS_WORD_EOF_3:
+            /* EOF found; Copy remaining bytes to userspace */
+            if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                    copy_bytes_nr))) {
+                rc = -EFAULT;
+                break;
+            }
+            frame_size += copy_bytes_nr;
+            total_chunk_size = 0;
+            rc = frame_size;
+
+            if (cache_line_number == -1) {
+                /* The whole frame was found in leftovers */
+                priv->leftover_begin += chunk_size + 1;
+                return rc;
+            }
+            priv->leftover_begin = 0;
+            priv->leftover_end = 0;
+
+            /* Save remaining bytes locked in cache */
+            memcpy(&priv->leftover_word[priv->leftover_end],
+                    &frame[begin + chunk_size + 1],
+                    (end - (begin + chunk_size + 1)) * sizeof(u32));
+            priv->leftover_end += end - (begin + chunk_size + 1);
+
+            /* copy the extra cache line in leftovers */
+            frame = priv->extraction_queue_fifo + (((cache_line_number + 1) %
+                    (FIFO_REMAPPER_SIZE / SMP_CACHE_BYTES)) * SMP_CACHE_BYTES);
+            memcpy(&priv->leftover_word[priv->leftover_end],
+                    frame, SMP_CACHE_BYTES);
+            priv->leftover_end += SMP_CACHE_BYTES / sizeof(u32);
 
             break;
-        case CONTROL_FRAME_TRUNCATE:
-        case CONTROL_FRAME_INVALID:
-            /* discard truncated or invalid frames */
-            frame_size = 0;
-            priv->leftover_begin = i + 1;
-            len = len_bk;
+        case RX_STATUS_WORD_DATA_NOT_READY:
+            /* Packet data not ready detected
+             * when attempting to read
+             */
+
+            /* copy current chunk */
+            if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                    copy_bytes_nr))) {
+                rc = -EFAULT;
+                break;
+            }
+            frame_size += copy_bytes_nr;
+            frame += total_chunk_size + 1;
+
+            /* prepare for the next chunk */
+            begin = begin + chunk_size + 1 - (total_chunk_size + 1);
+            end -= total_chunk_size + 1;
+
+            /* if we are still reading from leftovers, we need
+             * to increase the beginning of the chunk
+             */
+            if (cache_line_number == -1)
+                priv->leftover_begin += chunk_size + 1;
+
+            total_chunk_size = 0;
+
+            break;
+        case RX_STATUS_WORD_DATA:
+            /* didn't reach EOF yet; prepare the next chunk */
+            if (cache_line_number == -1) {
+                /* copy chunk from leftovers */
+                if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                        copy_bytes_nr))) {
+                    rc = -EFAULT;
+                    break;
+                }
+
+                frame_size += copy_bytes_nr;
+
+                /* leftovers are cleared; we need to start
+                 * reading packet data from FIFO
+                 */
+                priv->leftover_begin = 0;
+                priv->leftover_end = 0;
+
+                /* we must not be preempted while we have
+                 * L1 cache lines locked on a core
+                 */
+                preempt_disable();
+
+                /* load first 64B from extraction FIFO and
+                 * lock them into L1 cache
+                 */
+                cache_line_load_and_lock(priv->extraction_queue_fifo);
+                cache_line_number = 0;
+
+                frame = priv->extraction_queue_fifo;
+                begin = begin + chunk_size - end;
+                end = SMP_CACHE_BYTES / sizeof(u32);
+                total_chunk_size = 0;
+
+                /* get an extra cache of data */
+
+                /* before we get another cache line, check if
+                 * we reached the end of the remapper
+                 */
+                cache_line_load_and_lock(priv->extraction_queue_fifo +
+                        (((cache_line_number + 1) %
+                        (FIFO_REMAPPER_SIZE / SMP_CACHE_BYTES))
+                        * SMP_CACHE_BYTES));
+                break;
+            }
+
+            if (unlikely(cache_line_number == 0 && !bytes_nr && !frame_size)) {
+                /* we are not in the middle of a frame and no data is pending,
+                 * so the size of the returned frame is 0
+                 */
+
+                /* set rc to != 0 to exit while */
+                rc = 1;
+                break;
+            }
+
+            /* prepare for the next FIFO cache line */
+            cache_line_number = (cache_line_number + 1) %
+                    (FIFO_REMAPPER_SIZE /
+                    SMP_CACHE_BYTES);
+
+            /* if we reached the end of the remapper,
+             * start from beginning
+             */
+            if (unlikely(!cache_line_number)) {
+                /* copy current chunk */
+                if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                        copy_bytes_nr))) {
+                    rc = -EFAULT;
+                    break;
+                }
+                frame_size += copy_bytes_nr;
+
+                /* release last cache line */
+                cache_line_unlock(priv->extraction_queue_fifo +
+                        (((FIFO_REMAPPER_SIZE / SMP_CACHE_BYTES) - 1)
+                        * SMP_CACHE_BYTES));
+
+                frame = priv->extraction_queue_fifo;
+                begin = begin + chunk_size - total_chunk_size;
+                end = SMP_CACHE_BYTES / sizeof(u32);
+                total_chunk_size = 0;
+            } else {
+                begin += chunk_size;
+                end += SMP_CACHE_BYTES / sizeof(u32);
+            }
+
+            /* get an extra cache line of data */
+            if (unlikely(cache_line_number + 1 == FIFO_REMAPPER_SIZE /
+                    SMP_CACHE_BYTES)) {
+                /* if we reached the end of the remapper,
+                 * write current packet data to userspace
+                 * frist
+                 */
+                if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                        copy_bytes_nr))) {
+                    rc = -EFAULT;
+                    break;
+                }
+                frame_size += copy_bytes_nr;
+                frame += total_chunk_size;
+                begin -= total_chunk_size;
+                end -= total_chunk_size;
+                total_chunk_size = 0;
+
+                /* Unlock all the cache lines,
+                 * except the current (last) one
+                 */
+                for (i = 0; i < cache_line_number; i++)
+                    cache_line_unlock(priv->extraction_queue_fifo +
+                            (i * SMP_CACHE_BYTES));
+            }
+
+            cache_line_load_and_lock(priv->extraction_queue_fifo +
+                    (((cache_line_number + 1) %
+                    (FIFO_REMAPPER_SIZE / SMP_CACHE_BYTES))
+                    * SMP_CACHE_BYTES));
+            break;
+        case RX_STATUS_WORD_ESCAPE:
+            /* Chunk is interrupted by an escape character;
+             * copy valid bytes
+             */
+            if (unlikely(copy_to_user(&buff[frame_size], (u8*)frame,
+                    copy_bytes_nr))) {
+                rc = -EFAULT;
+                break;
+            }
+            frame_size += copy_bytes_nr;
+            frame += total_chunk_size + 1;
+
+            /* jump over first word since we know it's data */
+            begin = begin + chunk_size + 2 - (total_chunk_size + 1);
+            end -= total_chunk_size + 1;
+            if (cache_line_number == -1)
+                priv->leftover_begin += chunk_size + 1;
+            total_chunk_size = 0;
 
             break;
         default:
-            /* EOF specifying number of unused bytes or data not ready */
-            unwritten_bytes = copy_to_user(&buff[frame_size],
-                    &priv->leftover_word[priv->leftover_begin],
-                    min(len, (i - priv->leftover_begin) * sizeof(u32)));
-            if (likely(unwritten_bytes >= 0)) {
-                copied_bytes = min(len, (i - priv->leftover_begin) *
-                                    sizeof(u32)) - (ssize_t)unwritten_bytes;
-
-                /* remove unused bytes from last word */
-                if (likely(priv->leftover_word[i] !=
-                        CONTROL_FRAME_DATA_NOT_READY)) {
-                    unused_bytes = priv->leftover_word[i] &
-                                    CONTROL_FRAME_EOF_UNUSED_BYTES_MASK;
-                    if (likely(unused_bytes > (ssize_t)unwritten_bytes &&
-                            len >= ((i - priv->leftover_begin) * sizeof(u32)
-                                    - (size_t)unused_bytes)))
-                        copied_bytes -= unused_bytes - (ssize_t)unwritten_bytes;
-                }
-                frame_size += copied_bytes;
-                len -= copied_bytes;
-            }
-            priv->leftover_begin = i + 1;
-
-            /* We may find an entire frame in leftovers */
-            if (likely(frame_size > 0))
-                return frame_size;
+            /* We should never reach here */
+            pr_err("Unknown CPU Rx status word\n");
+            rc = -EINVAL;
         }
-    }
+    } while (!rc);
 
-    /* copy remaining data words from leftover */
-    unwritten_bytes = copy_to_user(&buff[frame_size],
-            &priv->leftover_word[priv->leftover_begin],
-            min(len, (i - priv->leftover_begin) * sizeof(u32)));
-    if (likely(unwritten_bytes >= 0)) {
-        copied_bytes = min(len, (i - priv->leftover_begin) * sizeof(u32))
-                        - (ssize_t)unwritten_bytes;
-        frame_size += copied_bytes;
-        len -= copied_bytes;
-    }
-
-    /* Clear leftovers */
-    priv->leftover_end = priv->leftover_begin = 0;
-
-    extr_cache = priv->extraction_queue_fifo;
-    chunk_size = cache_line_number = 0;
-
-    /* clear interrupt before reading */
-    if (!(ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT) & 1))
-        SET_REG(VTSS_DEVCPU_QS_REMAP_INTR_IDENT, GR0);
-
-    /* we must not be preempted while we have
-     * L1 cache lines locked on a core */
-    preempt_disable();
-
-    /* load first 64B from extraction fifo and lock them into L1 cache */
-    cache_line_load_and_lock(priv->extraction_queue_fifo);
-
-    do {
-        /* before we get another cache line, check if
-         * we reached the end of the remapper */
-        if (unlikely(cache_line_number + 1 ==
-                FIFO_REMAPPER_SIZE/SMP_CACHE_BYTES)) {
-            /* write current packet data to userspace */
-            unwritten_bytes = copy_to_user(&buff[frame_size], extr_cache,
-                    min(len, chunk_size * sizeof(u32)));
-            if (likely(unwritten_bytes >= 0)) {
-                copied_bytes = min(len, chunk_size * sizeof(u32)) -
-                        (ssize_t)unwritten_bytes;
-                frame_size += copied_bytes;
-                len -= copied_bytes;
-            }
-            extr_cache += chunk_size;
-            chunk_size = 0;
-
-            /* release cache lines, since we sent
-             * the packet data from them */
-            for (i = 0; i < cache_line_number - 1; i++)
+    /* release all the locked cache lines */
+    if (cache_line_number != -1) {
+        if (unlikely(((cache_line_number + 1) %
+                (FIFO_REMAPPER_SIZE / SMP_CACHE_BYTES)) == 0)) {
+            /* there are only 2 cache lines to release:
+             * the last and the first of the remapper
+             */
+            cache_line_unlock(priv->extraction_queue_fifo +
+                    (cache_line_number * SMP_CACHE_BYTES));
+            cache_line_unlock(priv->extraction_queue_fifo);
+        } else {
+            for (i = 0; i <= cache_line_number + 1; i++)
                 cache_line_unlock(priv->extraction_queue_fifo +
                         (i * SMP_CACHE_BYTES));
         }
 
-        /* get an extra cache line of data */
-        cache_line_load_and_lock(priv->extraction_queue_fifo +
-                ((cache_line_number + 1) %
-                        (FIFO_REMAPPER_SIZE/SMP_CACHE_BYTES)) *
-                    SMP_CACHE_BYTES);
-
-        /* parse the cache line for EOF words */
-        for (i = 0; i < SMP_CACHE_BYTES/sizeof(u32); i++) {
-            if (likely((extr_cache[chunk_size] & CONTROL_FRAME_EOF_MASK) !=
-                    CONTROL_FRAME_EOF)) {
-                chunk_size++;
-                continue;
-            }
-
-            if (unlikely(data_next)) {
-                data_next = 0;
-                chunk_size++;
-                continue;
-            }
-
-            switch(extr_cache[chunk_size]) {
-            case CONTROL_FRAME_ESCAPE:
-                unwritten_bytes = copy_to_user(&buff[frame_size], extr_cache,
-                        min(len, chunk_size * sizeof(u32)));
-                if (likely(unwritten_bytes >= 0)) {
-                    copied_bytes = min(len, chunk_size * sizeof(u32)) -
-                            (ssize_t)unwritten_bytes;
-                    frame_size += copied_bytes;
-                    len -= copied_bytes;
-                }
-                extr_cache += chunk_size + 1;
-                chunk_size = 0;
-
-                /* next word is data, so we skip it */
-                data_next = 1;
-
-                break;
-            case CONTROL_FRAME_TRUNCATE:
-            case CONTROL_FRAME_INVALID:
-                extr_cache += chunk_size + 1;
-                chunk_size = frame_size = 0;
-                len = len_bk;
-
-            break;
-            default:
-                /* we might receive EOF, even if we are not
-                 * in the middle of a frame */
-                if (unlikely(!chunk_size && !frame_size)) {
-                    extr_cache++;
-                    continue;
-                }
-
-                unwritten_bytes = copy_to_user(&buff[frame_size], extr_cache,
-                        min(len, chunk_size * sizeof(u32)));
-                if (likely(unwritten_bytes >= 0)) {
-                    copied_bytes = min(len, chunk_size * sizeof(u32)) -
-                            (ssize_t)unwritten_bytes;
-
-                    /* remove unused bytes from last word */
-                    if (likely(extr_cache[chunk_size] !=
-                            CONTROL_FRAME_DATA_NOT_READY)) {
-                        unused_bytes = extr_cache[chunk_size] &
-                                CONTROL_FRAME_EOF_UNUSED_BYTES_MASK;
-                        if (likely(unused_bytes > (ssize_t)unwritten_bytes &&
-                                len >= (chunk_size * sizeof(u32) -
-                                        unused_bytes)))
-                            copied_bytes -= unused_bytes -
-                                                (ssize_t)unwritten_bytes;
-                    }
-                    frame_size += copied_bytes;
-                    len -= copied_bytes;
-                }
-
-                extr_cache += chunk_size + 1;
-                chunk_size = 0;
-
-                /* a frame has been extracted */
-                eof = 1;
-
-                i++;
-                /* copy remaining words in leftover */
-                if (unlikely(i == SMP_CACHE_BYTES/sizeof(u32)))
-                    break;
-
-                memcpy(priv->leftover_word, extr_cache,
-                        (SMP_CACHE_BYTES/sizeof(u32) - i) * sizeof(u32));
-                priv->leftover_begin = 0;
-                priv->leftover_end = SMP_CACHE_BYTES/sizeof(u32) - i;
-                break;
-            }
-            if (unlikely(eof))
-                break;
-        }
-
-        /* prepare for the next cache line */
-        cache_line_number = (cache_line_number + 1) %
-                (FIFO_REMAPPER_SIZE/SMP_CACHE_BYTES);
-
-        if (unlikely(!cache_line_number)) {
-            /* we start from the beginning of the remapper;
-             * copy to userspace what we have until now*/
-            unwritten_bytes = copy_to_user(&buff[frame_size], extr_cache,
-                    min(len, chunk_size * sizeof(u32)));
-            if (likely(unwritten_bytes >= 0)) {
-                copied_bytes = min(len, chunk_size * sizeof(u32)) -
-                        (ssize_t)unwritten_bytes;
-                frame_size += copied_bytes;
-                len -= copied_bytes;
-            }
-            extr_cache = priv->extraction_queue_fifo;
-            chunk_size = 0;
-
-            /* free last cache line */
-            cache_line_unlock(priv->extraction_queue_fifo +
-                    FIFO_REMAPPER_SIZE - SMP_CACHE_BYTES);
-        }
-    }while (!eof && (chunk_size || frame_size));
-
-    /* remember the the extra loaded words from cache line*/
-    memcpy(&priv->leftover_word[priv->leftover_end],
-            priv->extraction_queue_fifo + (cache_line_number * SMP_CACHE_BYTES),
-            SMP_CACHE_BYTES);
-    priv->leftover_end += SMP_CACHE_BYTES/sizeof(u32);
-
-    /* release all locked cache lines */
-    for (i = 0; i <= cache_line_number; i++)
-        cache_line_unlock(priv->extraction_queue_fifo + (i * SMP_CACHE_BYTES));
-
-    /* all cache lines have been released, it's safe to be preempted */
-    preempt_enable();
+        /* all cache lines have been released,
+         * it's safe to be preempted
+         */
+        preempt_enable();
+    }
 
     return frame_size;
 }
