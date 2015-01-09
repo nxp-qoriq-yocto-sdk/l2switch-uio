@@ -405,7 +405,7 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
 
     if (unlikely(ioread32(VTSS_DEVCPU_QS_INJ_INJ_STATUS) &
             VTSS_M_DEVCPU_QS_INJ_INJ_STATUS_INJ_IN_PROGRESS)) {
-        pr_err("FIFO is busy reciving another frame\n");
+        pr_err("FIFO is busy receiving another frame\n");
         rc = -EBUSY;
         goto __out_release_lock;
     }
