@@ -308,6 +308,48 @@ static int seville_irqcontrol(struct uio_info *info, s32 irq_on)
     return 0;
 }
 
+static int seville_open(struct uio_info *info, struct inode *inode)
+{
+    struct uio_seville *priv;
+    int rc;
+
+    if (!info)
+        return -EINVAL;
+
+    priv = info->priv;
+    if (!priv)
+        return -EINVAL;
+
+    rc = 0;
+    spin_lock(&priv->lock);
+    if (test_and_set_bit(1, &priv->flags))
+        rc = -EBUSY;
+
+    spin_unlock(&priv->lock);
+    return rc;
+}
+
+static int seville_release(struct uio_info *info, struct inode *inode)
+{
+    struct uio_seville *priv;
+    int rc;
+
+    if (!info)
+        return -EINVAL;
+
+    priv = info->priv;
+    if (!priv)
+        return -EINVAL;
+
+    rc = 0;
+    spin_lock(&priv->lock);
+    if (!test_and_clear_bit(1, &priv->flags))
+        rc = -EINVAL;
+
+    spin_unlock(&priv->lock);
+    return rc;
+}
+
 static void __iomem *seville_of_io_remap(struct platform_device *pdev,
                                          struct uio_info *info,
                                          int index)
@@ -633,6 +675,8 @@ static int seville_probe(struct platform_device *pdev)
 #endif
     info->handler = seville_handler;
     info->irqcontrol = seville_irqcontrol;
+    info->open = seville_open;
+    info->release = seville_release;
 
     spin_lock_init(&priv->lock);
     priv->flags = 0; /* interrupt is enabled in MPICH to begin with */
