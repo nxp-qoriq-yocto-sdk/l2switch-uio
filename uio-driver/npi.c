@@ -463,9 +463,9 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
     i = 0;
     if (likely(len >= 4))
         for (; i < len - 4; i += 4) {
-        iowrite32be(((buff[i] & 0xFF) << 24) + ((buff[i + 1] & 0xFF) << 16) +
+            iowrite32be(((buff[i] & 0xFF) << 24) + ((buff[i + 1] & 0xFF) << 16) +
                 ((buff[i + 2] & 0xFF) << 8) + (buff[i + 3] & 0xFF),
-            VTSS_DEVCPU_QS_INJ_INJ_WR(0));
+                VTSS_DEVCPU_QS_INJ_INJ_WR(0));
         }
 
     val = 0;
