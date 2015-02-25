@@ -530,7 +530,7 @@ static int dev_npi_open(struct inode *inode, struct file *file)
         SET_REG(VTSS_DEVCPU_QS_XTR_XTR_FLUSH, 1);
 
         /* flush as long as we have frames */
-        while (1 & ioread32(VTSS_DEVCPU_QS_REMAP_INTR_RAW))
+        while (1 & ioread32(VTSS_DEVCPU_QS_XTR_XTR_DATA_PRESENT))
             ; /* flushing data */
 
         /* disable flushing */
