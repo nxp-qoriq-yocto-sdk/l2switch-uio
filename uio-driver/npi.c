@@ -29,6 +29,21 @@
 
 #define FIFO_REMAPPER_SIZE	4096
 
+#define CONTROL_FRAME_PORT		10
+#define INJ_CONTROL_FRAME_MIN_LEN	60
+
+#define NO_CPU_INJ_HD_LEN		0
+#define CPU_INJ_HD_NO_PREFIX_LEN	16
+#define CPU_INJ_HD_SHORT_PREFIX_LEN	20
+#define CPU_INJ_HD_LONG_PREFIX_LEN	32
+
+static const int inj_fh_type_to_len[] = {
+		NO_CPU_INJ_HD_LEN,
+		CPU_INJ_HD_NO_PREFIX_LEN,
+		CPU_INJ_HD_SHORT_PREFIX_LEN,
+		CPU_INJ_HD_LONG_PREFIX_LEN
+};
+
 enum status_word {
 	RX_STATUS_WORD_DATA,
 	RX_STATUS_WORD_EOF_0,
@@ -390,18 +405,29 @@ static ssize_t do_control_frame_extr_dev(struct npi_device *priv,
 }
 
 static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
-		const char __user *buff_usr, const size_t len)
+		const char __user *buff_usr, const size_t len_usr)
 {
     struct uio_info *info;
     u32 val;
     size_t i;
     ssize_t rc;
+    ssize_t len;
     unsigned long not_copied;
     char *buff;
+    int inj_hd_type, inj_hd_len;
 
     info = priv->info;
 
     spin_lock(&priv->tx_lock);
+
+    /* Get expected size of CPU injection header */
+    inj_hd_type = VTSS_X_SYS_SYSTEM_PORT_MODE_INCL_INJ_HDR(
+                  ioread32(VTSS_SYS_SYSTEM_PORT_MODE(CONTROL_FRAME_PORT)));
+    inj_hd_len = inj_fh_type_to_len[inj_hd_type];
+
+    /* pad injected control frame if needed */
+    len = (len_usr > inj_hd_len + INJ_CONTROL_FRAME_MIN_LEN ?
+           len_usr : inj_hd_len + INJ_CONTROL_FRAME_MIN_LEN);
 
     if (unlikely(ioread32(VTSS_DEVCPU_QS_INJ_INJ_STATUS) &
             VTSS_M_DEVCPU_QS_INJ_INJ_STATUS_INJ_IN_PROGRESS)) {
@@ -416,13 +442,13 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
         ;
 
     /* get frame from userspace */
-    buff = kmalloc(len, GFP_KERNEL);
+    buff = kzalloc(len, GFP_KERNEL);
     if (unlikely(!buff)) {
         rc = -ENOMEM;
         goto __out_release_lock;
     }
 
-    not_copied = copy_from_user(buff, buff_usr, len);
+    not_copied = copy_from_user(buff, buff_usr, len_usr);
     if (unlikely(not_copied)) {
         rc = -EFAULT;
         goto __out_free;
@@ -476,7 +502,7 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
     /* write dummy FCS */
     iowrite32be(0, VTSS_DEVCPU_QS_INJ_INJ_WR(0));
 
-    rc = len;
+    rc = len_usr;
 
 __out_free:
     kfree(buff);
