@@ -1,5 +1,5 @@
 obj-m := uio_seville.o
-uio_seville-objs := npi.o uio_seville_main.o
+uio_seville-objs := npi.o phy_seville.o uio_seville_main.o
 
 SRC := $(shell pwd)
 
