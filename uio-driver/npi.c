@@ -409,7 +409,8 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
 {
     struct uio_info *info;
     u32 val;
-    size_t i;
+    size_t i, j;
+    size_t last_word_valid_bytes;
     ssize_t rc;
     ssize_t len;
     unsigned long not_copied;
@@ -468,34 +469,16 @@ static ssize_t do_control_frame_inj_dev(struct npi_device *priv,
                 VTSS_DEVCPU_QS_INJ_INJ_WR(0));
         }
 
-    val = 0;
-    switch(len - i) {
-    case 1:
-        val += (buff[i] & 0xFF) << 24;
-        break;
-    case 2:
-        val += ((buff[i] & 0xFF) << 24) +
-            ((buff[i + 1] & 0xFF) << 16);
-        break;
-    case 3:
-        val += ((buff[i] & 0xFF) << 24) +
-            ((buff[i + 1] & 0xFF) << 16) +
-            ((buff[i + 2] & 0xFF) << 8);
-        break;
-    case 4:
-        val += ((buff[i] & 0xFF) << 24) +
-            ((buff[i + 1] & 0xFF) << 16) +
-            ((buff[i + 2] & 0xFF) << 8) +
-            (buff[i + 3] & 0xFF);
-        break;
-    }
+    last_word_valid_bytes = len - i;
+    for(val = 0, j = sizeof(u32) - 1; i < len; i++, j--)
+        val |= (buff[i] & 0xFF) << (j * 8);
 
     iowrite32be(val, VTSS_DEVCPU_QS_INJ_INJ_WR(0));
 
     /* set valid bytes from last word */
     iowrite32((ioread32(VTSS_DEVCPU_QS_INJ_INJ_CTRL(0)) &
         ~VTSS_M_DEVCPU_QS_INJ_INJ_CTRL_VLD_BYTES) |
-            VTSS_F_DEVCPU_QS_INJ_INJ_CTRL_VLD_BYTES((len - i) % 4) |
+            VTSS_F_DEVCPU_QS_INJ_INJ_CTRL_VLD_BYTES(last_word_valid_bytes % 4) |
         VTSS_F_DEVCPU_QS_INJ_INJ_CTRL_EOF,
         VTSS_DEVCPU_QS_INJ_INJ_CTRL(0));
 
