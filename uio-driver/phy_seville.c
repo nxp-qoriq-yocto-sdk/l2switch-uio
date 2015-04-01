@@ -361,8 +361,12 @@ int seville_phy_destroy(struct seville_port_info *port_info,
                         struct seville_port_list *port_list,
                         struct kobject *seville_kobj)
 {
-    if (!port_info || !port_list || !seville_kobj)
-        return -EINVAL;
+    int rc = 0;
+
+    if (!port_info || !port_list || !seville_kobj) {
+	    rc = -EINVAL;
+	    goto _out_return;
+    }
 
     /* Remove symbolic link in UIO sysfs to PHY sysfs entries */
     sysfs_remove_link(seville_kobj, port_list->sysfs_phy_name);
@@ -376,10 +380,11 @@ int seville_phy_destroy(struct seville_port_info *port_info,
             port_list->phy_dev->attached_dev = NULL;
         }
     }
-    if (port_list->sysfs_phy_name) {
+
+_out_return:
+    if (port_list && port_list->sysfs_phy_name) {
         kfree(port_list->sysfs_phy_name);
         port_list->sysfs_phy_name = NULL;
     }
-
-    return 0;
+    return rc;
 }
