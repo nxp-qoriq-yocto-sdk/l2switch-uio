@@ -14,6 +14,10 @@
 #define PHY_SEVILLE_H_
 
 #include <linux/io.h>
+#include <linux/sched.h>
+#include <linux/cdev.h>
+#include <linux/wait.h>
+#include <linux/spinlock.h>
 
 /* enums used for PHY's flag bits */
 enum {
@@ -31,6 +35,13 @@ struct seville_port_list {
 
     char                *sysfs_phy_name;
     struct phy_device   *phy_dev;
+    struct mutex        phy_lock;
+    spinlock_t          phy_flags_lock;
+    unsigned long       flags;
+    struct cdev         phy_cdev;
+    unsigned int        phy_irq;
+    wait_queue_head_t   phy_read_q;
+    atomic_t            irq_count;
 };
 
 struct seville_port_info {

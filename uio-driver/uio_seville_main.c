@@ -342,7 +342,7 @@ static struct phy_driver phy_driver_stub = {
 		.driver		= {.owner= THIS_MODULE, },
 };
 
-static int seville_phy_init(struct seville_port_info *info)
+static int seville_phy_init(struct seville_port_info *info, int ports_nr)
 {
     int rc;
 
@@ -355,17 +355,38 @@ static int seville_phy_init(struct seville_port_info *info)
 
     info->seville_phy_drv_stub = &phy_driver_stub;
 
+    /* create char device region */
+    if ((rc = alloc_chrdev_region(&info->seville_phy_dev, 0, ports_nr,
+                                  "l2sw_phy")))
+           goto __err_phy_alloc_chrdev_region;
+
+    info->seville_phy_class = class_create(THIS_MODULE, "l2sw_phy");
+    if (IS_ERR(info->seville_phy_class)) {
+        rc = PTR_ERR(info->seville_phy_class);
+        goto __err_phy_class_create;
+    }
+
     INIT_LIST_HEAD(&info->port_list.list);
 
     return 0;
 
+__err_phy_class_create:
+    info->seville_phy_class = NULL;
+    unregister_chrdev_region(info->seville_phy_dev, ports_nr);
+__err_phy_alloc_chrdev_region:
+    phy_driver_unregister(&phy_driver_stub);
+    info->seville_phy_drv_stub = NULL;
 __err_ret:
     return rc;
 }
 
 static void seville_phy_close(struct seville_port_info *info, int ports_nr)
 {
+    if (info->seville_phy_class)
+        class_destroy(info->seville_phy_class);
+    info->seville_phy_class = NULL;
 
+    unregister_chrdev_region(info->seville_phy_dev, ports_nr);
 
     if (info->seville_phy_drv_stub)
         phy_driver_unregister(info->seville_phy_drv_stub);
@@ -466,7 +487,7 @@ static int seville_probe(struct platform_device *pdev)
     }
 
     /* Register stub PHY driver */
-    if ((ret = seville_phy_init(&priv->port_info)))
+    if ((ret = seville_phy_init(&priv->port_info, SEVILLE_PORTS_NR_MAX)))
         goto __out_err_phy_init;
 
     /* Parse port nodes */
