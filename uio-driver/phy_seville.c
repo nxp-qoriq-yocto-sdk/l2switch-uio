@@ -772,13 +772,17 @@ int seville_phy_destroy(struct seville_port_info *port_info,
     /* nothing to do if there is no PHY device attached */
     if (port_list->phy_dev) {
         flush_work(&port_list->phy_dev->phy_queue);
-        port_list->phy_irq = 0;
 
-        cdev_del(&port_list->phy_cdev);
+        if (port_list->phy_irq) {
+            cdev_del(&port_list->phy_cdev);
 
-        devno = MKDEV(MAJOR(port_info->seville_phy_dev), port_list->port_idx);
-        if (port_info->seville_phy_class)
-            device_destroy(port_info->seville_phy_class, devno);
+            devno = MKDEV(MAJOR(port_info->seville_phy_dev),
+                          port_list->port_idx);
+            if (port_info->seville_phy_class)
+                device_destroy(port_info->seville_phy_class, devno);
+
+            port_list->phy_irq = 0;
+        }
     }
 
     /* Remove symbolic link in UIO sysfs to PHY sysfs entries */
